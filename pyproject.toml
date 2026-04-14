@@ -56,7 +56,7 @@ coverage-tests = "pytest --cov"
 old-click-tests = { cmd = "pytest", executor = {with = ["click==6.7"]}}
 
 coverage-xml = { cmd = "coverage xml --fail-under 0", executor = {with = ["coverage[toml]"]}}
-coverage-xml = { cmd = "codecov", executor = {with = ["codecov"]}}
+coverage-upload = { cmd = "codecov", executor = {with = ["codecov"]}}
 coverage = ["coverage-xml", "coverage-upload"]
 
 [tool.coverage.paths]
