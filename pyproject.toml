@@ -37,12 +37,15 @@ dev = [
     "typeguard>=4.4.4",
 ]
 
+[tool.poe]
+executor = { type = "uv" }
+
 [tool.poe.tasks]
 format = "ruff format"
 
 checks = ["lint", "audit", "mypy", "pytype"]
 lint = "ruff check"
-audit = "uv run --with pip-audit pip-audit --skip-editable --ignore-vuln CVE-2026-4539"
+audit = { cmd = "pip-audit", executor = {with = ["pip-audit"]}}
 mypy = "mypy ."
 pytype = "pytype ."
 
@@ -50,10 +53,10 @@ tests = ["pytest", "typed-tests", "coverage-tests", "old-click-tests"]
 pytest = "pytest"
 typed-tests = "pytest --typeguard-packages=reportseff"
 coverage-tests = "pytest --cov"
-old-click-tests = "uv run --with 'click==6.7' pytest"
+old-click-tests = { cmd = "pytest", executor = {with = ["click==6.7"]}}
 
-coverage-xml = "uv run --with coverage[toml] coverage xml --fail-under 0"
-coverage-upload = "uv run --with codecov codecov"
+coverage-xml = { cmd = "coverage xml --fail-under 0", executor = {with = ["coverage[toml]"]}}
+coverage-xml = { cmd = "codecov", executor = {with = ["codecov"]}}
 coverage = ["coverage-xml", "coverage-upload"]
 
 [tool.coverage.paths]

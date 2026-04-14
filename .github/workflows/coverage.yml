@@ -15,8 +15,6 @@ jobs:
           python-version: "3.10"
 
       - name: Run Tests and Coverage
-        # We use 'uvx' to run poe without adding it to the project's dev-deps.
-        # This replaces the entire nox/poetry workflow.
         run: |
-          uvx --from poethepoet poe tests
-          uvx --from poethepoet poe coverage
+          uv run poe tests
+          uv run poe coverage
