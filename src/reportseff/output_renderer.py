@@ -264,7 +264,7 @@ class ColumnFormatter:
         elif fold_title in ("timeeff", "memeff", "gpumem"):
             self.color_function = lambda x: render_eff(x, "mid")
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Test for equality.
 
         Args:

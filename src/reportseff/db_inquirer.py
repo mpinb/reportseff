@@ -215,7 +215,8 @@ class SacctInquirer(BaseInquirer):
         args = []
         if self.user:
             if not self.since:
-                start_date = datetime.date.today() - datetime.timedelta(days=7)
+                # want to use the local, cluster time
+                start_date = datetime.date.today() - datetime.timedelta(days=7)  # noqa: DTZ011
                 self.since = start_date.strftime("%m%d%y")  # MMDDYY
             args += [f"--user={self.user}"]
         elif self.query_all_users:
@@ -412,7 +413,8 @@ class SacctInquirer(BaseInquirer):
                 except ValueError:
                     continue
 
-        date = datetime.datetime.today()
+        # want to use the local, cluster time
+        date = datetime.datetime.today()  # noqa: DTZ002
         date -= datetime.timedelta(**date_args)
         return date.strftime("%Y-%m-%dT%H:%M")  # MMDDYY
 

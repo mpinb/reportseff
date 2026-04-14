@@ -498,7 +498,7 @@ def test_sacct_set_until(
 
     # has an equal sign, handles year, month, day, hour, minute
     mock_date = mocker.MagicMock()
-    mock_date.today.return_value = datetime.datetime(2018, 1, 20, 10, 15, 20)
+    mock_date.today.return_value = datetime.datetime(2018, 1, 20, 10, 15, 20)  # noqa: DTZ001
     mock_date.side_effect = datetime.date
     mocker.patch("reportseff.db_inquirer.datetime.datetime", mock_date)
 
@@ -573,7 +573,7 @@ def test_sacct_set_since(
 
     # has an equal sign, handles year, month, day, hour, minute
     mock_date = mocker.MagicMock()
-    mock_date.today.return_value = datetime.datetime(2018, 1, 20, 10, 15, 20)
+    mock_date.today.return_value = datetime.datetime(2018, 1, 20, 10, 15, 20)  # noqa: DTZ001
     mock_date.side_effect = datetime.date
     mocker.patch("reportseff.db_inquirer.datetime.datetime", mock_date)
 

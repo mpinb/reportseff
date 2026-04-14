@@ -82,7 +82,7 @@ class Job:
         self.other_entries["JobID"] = self.name()
         self.comment_data: dict[str, Any] = {}
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Test for equality.
 
         Args:
@@ -123,42 +123,7 @@ class Job:
             self._cache_entries()
 
         elif self.state != "RUNNING":
-            for k, value in entry.items():
-                # record first non-empty job step
-                if k not in self.other_entries or not self.other_entries[k]:
-                    self.other_entries[k] = value
-
-                # record max of all steps
-                elif k.casefold().startswith("max"):
-                    with contextlib.suppress(ValueError):
-                        # will convert numerics to floats as well
-                        new_value = parsemem(value)
-                        old_value = parsemem(self.other_entries[k])
-                        if new_value > old_value:
-                            self.other_entries[k] = value
-
-                # record totals
-                total_val: Any = value
-                with contextlib.suppress(ValueError):
-                    total_val = parsemem(value)
-
-                if k in self.totals:
-                    if isinstance(total_val, float) and isinstance(
-                        self.totals[k], float
-                    ):
-                        self.totals[k] += total_val
-                elif total_val not in (0, ""):
-                    self.totals[k] = total_val
-
-            mem = parsemem(entry["MaxRSS"]) if "MaxRSS" in entry else 0
-            tasks = int(entry.get("NTasks", 1))
-            self.stepmem = max(self.stepmem, mem * tasks)
-
-            if "TRESUsageOutAve" in entry:
-                self.energy = max(
-                    self.energy,
-                    _parse_energy(entry["TRESUsageOutAve"]),
-                )
+            self._update_sub_job(entry)
 
     def _update_main_job(self, entry: dict[str, str]) -> None:
         """Update properties for the main job.
@@ -206,6 +171,42 @@ class Job:
             and len(entry["AdminComment"]) > ADMIN_COMMENT_MIN_LENGTH
         ):
             self._parse_admin_comment(entry["AdminComment"])
+
+    def _update_sub_job(self, entry: dict[str, str]) -> None:
+        for k, value in entry.items():
+            # record first non-empty job step
+            if k not in self.other_entries or not self.other_entries[k]:
+                self.other_entries[k] = value
+
+            # record max of all steps
+            elif k.casefold().startswith("max"):
+                with contextlib.suppress(ValueError):
+                    # will convert numerics to floats as well
+                    new_value = parsemem(value)
+                    old_value = parsemem(self.other_entries[k])
+                    if new_value > old_value:
+                        self.other_entries[k] = value
+
+            # record totals
+            total_val: Any = value
+            with contextlib.suppress(ValueError):
+                total_val = parsemem(value)
+
+            if k in self.totals:
+                if isinstance(total_val, float) and isinstance(self.totals[k], float):
+                    self.totals[k] += total_val
+            elif total_val not in (0, ""):
+                self.totals[k] = total_val
+
+        mem = parsemem(entry["MaxRSS"]) if "MaxRSS" in entry else 0
+        tasks = int(entry.get("NTasks", 1))
+        self.stepmem = max(self.stepmem, mem * tasks)
+
+        if "TRESUsageOutAve" in entry:
+            self.energy = max(
+                self.energy,
+                _parse_energy(entry["TRESUsageOutAve"]),
+            )
 
     def _parse_admin_comment(self, comment: str) -> None:
         """Use admin command to override efficiency values.
