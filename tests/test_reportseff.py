@@ -684,6 +684,54 @@ def test_array_job_base(mocker: MockerFixture, console_jobs: dict[str, str]) -> 
 
 
 @pytest.mark.usefixtures("_mock_inquirer")
+def test_array_summary_option(
+    mocker: MockerFixture, console_jobs: dict[str, str]
+) -> None:
+    """--array-summary appends a summary block after the array tasks."""
+    mocker.patch("reportseff.console.which", return_value=True)
+    runner = CliRunner()
+    sub_result = mocker.MagicMock()
+    sub_result.returncode = 0
+    sub_result.stdout = console_jobs["24221219"] + console_jobs["24221220"]
+    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=sub_result)
+    result = runner.invoke(
+        console.main,
+        [
+            "--no-color",
+            "--array-summary",
+            "24220929",
+            "--format",
+            "JobID%>,State,Elapsed%>,CPUEff,MemEff",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Array 24220929" in result.output
+    # one COMPLETED and one PENDING task
+    assert "1/2 completed (50%)" in result.output
+
+
+@pytest.mark.usefixtures("_mock_inquirer")
+def test_array_summary_option_default_off(
+    mocker: MockerFixture, console_jobs: dict[str, str]
+) -> None:
+    """Without the flag, no summary block is produced."""
+    mocker.patch("reportseff.console.which", return_value=True)
+    runner = CliRunner()
+    sub_result = mocker.MagicMock()
+    sub_result.returncode = 0
+    sub_result.stdout = console_jobs["24221219"] + console_jobs["24221220"]
+    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=sub_result)
+    result = runner.invoke(
+        console.main,
+        ["--no-color", "24220929", "--format", "JobID%>,State,Elapsed%>,CPUEff,MemEff"],
+    )
+
+    assert result.exit_code == 0
+    assert "Array 24220929" not in result.output
+
+
+@pytest.mark.usefixtures("_mock_inquirer")
 def test_sacct_error(mocker: MockerFixture) -> None:
     """Subprocess errors in sacct are reported."""
     mocker.patch("reportseff.console.which", return_value=True)

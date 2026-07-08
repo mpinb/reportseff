@@ -158,6 +158,35 @@ MAX_ENTRIES_TO_ECHO = 20
     "recover GPU efficiency data by calling `jobstats -b`. "
     "Pass this flag to suppress that behaviour.",
 )
+@click.option(
+    "--array-summary",
+    is_flag=True,
+    default=False,
+    help="Append a summary block (min/mean/max, state counters, completion "
+    "progress, total task-time) after each job array. Opt-in; no effect when "
+    "not set. Suppressed in parsable mode.",
+)
+@click.option(
+    "--array-summary-hist",
+    is_flag=True,
+    default=False,
+    help="With --array-summary, add a task runtime histogram (minutes) for "
+    "arrays larger than --array-summary-hist-min-tasks.",
+)
+@click.option(
+    "--array-summary-hist-min-tasks",
+    default=50,
+    type=int,
+    help="Minimum number of array tasks before a runtime histogram is drawn "
+    "(default 50).",
+)
+@click.option(
+    "--array-summary-sparkline",
+    is_flag=True,
+    default=False,
+    help="Render the runtime distribution as a compact one-line sparkline "
+    "instead of a multi-line histogram.",
+)
 @click.version_option(version=__version__)
 @click.argument("jobs", nargs=-1)
 def main(**kwargs: Any) -> None:
@@ -189,10 +218,16 @@ def get_jobs(args: ReportseffParameters) -> tuple[str, int]:
 
     inquirer, renderer = get_implementation(
         args.format_str,
-        node=args.node,
-        node_and_gpu=args.node_and_gpu,
-        parsable=args.parsable,
-        delimiter=args.delimiter,
+        RenderOptions(
+            node=args.node or args.node_and_gpu,
+            gpu=args.node_and_gpu,
+            parsable=args.parsable,
+            delimiter=args.delimiter,
+            array_summary=args.array_summary,
+            array_summary_hist=args.array_summary_hist,
+            array_summary_hist_min_tasks=args.array_summary_hist_min_tasks,
+            array_summary_sparkline=args.array_summary_sparkline,
+        ),
     )
 
     inquirer.set_state(args.state)
@@ -254,20 +289,13 @@ def get_jobs(args: ReportseffParameters) -> tuple[str, int]:
 
 def get_implementation(
     format_str: str,
-    *,
-    node: bool = False,
-    node_and_gpu: bool = False,
-    parsable: bool = False,
-    delimiter: str = " ",
+    options: RenderOptions,
 ) -> tuple[BaseInquirer, OutputRenderer]:
     """Get system-specific objects.
 
     Args:
         format_str: the formatting options specified by user
-        node: control if node-level stats are displayed
-        node_and_gpu: control if node and gpu stats are displayed
-        parsable: produce output with a delimiter separating columns
-        delimiter: delimiter used for parsable output
+        options: rendering options controlling display behavior
 
     Returns:
         A db_inqurirer
@@ -277,12 +305,7 @@ def get_implementation(
         inquirer = SacctInquirer()
         renderer = OutputRenderer(
             inquirer.get_valid_formats(),
-            RenderOptions(
-                node=node or node_and_gpu,
-                gpu=node_and_gpu,
-                parsable=parsable,
-                delimiter=delimiter,
-            ),
+            options,
             format_str,
         )
     else:
