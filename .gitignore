@@ -5,6 +5,7 @@ dist/
 *.swp
 .python-version
 .coverage
-work/
-# ignore the .vscode folder, which is used by Visual Studio Code for project settings
+# ignore .vscode settings
 .vscode/
+# ignore local work area
+work/

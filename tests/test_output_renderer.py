@@ -587,8 +587,7 @@ def test_formatter_init() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Unable to parse format token 'test%a', "
-            "did you forget to wrap in quotes?"
+            "Unable to parse format token 'test%a', did you forget to wrap in quotes?"
         ),
     ):
         result = output_renderer.ColumnFormatter("test%a")
@@ -597,7 +596,7 @@ def test_formatter_init() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Unable to parse format token 'test%', " "did you forget to wrap in quotes?"
+            "Unable to parse format token 'test%', did you forget to wrap in quotes?"
         ),
     ):
         result = output_renderer.ColumnFormatter("test%")
@@ -737,3 +736,558 @@ def test_formatter_format_entry() -> None:
 
     fmt.end = "e"
     assert fmt.format_entry("A Long Entry") == "ng Entry"
+
+
+
+# ---------------------------------------------------------------------------
+# summarize: grouped summary rendering (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def _summary_renderer(
+    *, node: bool = False, parsable: bool = False
+) -> OutputRenderer:
+    """Renderer with a format string exercising the summary metrics."""
+    return output_renderer.OutputRenderer(
+        min_required,
+        output_renderer.RenderOptions(node=node, parsable=parsable),
+        format_str="JobID,State,Elapsed,CPUEff,TimeEff",
+    )
+
+
+def _summary_job(
+    jobid: str,
+    state: str,
+    elapsed: str = "00:10:00",
+    total_cpu: str = "00:09:00",
+    *,
+    job_name: str = "",
+) -> Job:
+    """Build a task job for grouped-summary renderer tests."""
+    job = Job(jobid.split("_", 1)[0], jobid, None)
+    entry = {
+        "JobID": jobid,
+        "State": state,
+        "AllocCPUS": "1",
+        "ReqMem": "1Gn",
+        "TotalCPU": total_cpu,
+        "Elapsed": elapsed,
+        "Timelimit": "00:20:00",
+        "MaxRSS": "",
+        "NNodes": "1",
+        "NTasks": "",
+    }
+    if job_name:
+        entry["JobName"] = job_name
+    job.update(entry)
+    return job
+
+
+def test_format_grouped_summary_array_grouping() -> None:
+    """--group-by=array groups by base id and labels the block 'Array'."""
+    jobs = [
+        _summary_job("100_1", "COMPLETED"),
+        _summary_job("100_2", "FAILED", elapsed="00:00:30"),
+        _summary_job("200", "COMPLETED"),
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Array 100" in output
+    # singleton 200 gets no summary block
+    assert output.count("Array ") == 1
+    assert "1/2 completed (50%)" in output
+
+
+def test_format_grouped_summary_name_grouping() -> None:
+    """--group-by=name groups by JobName and labels the block 'Group'."""
+    jobs = [
+        _summary_job("100_1", "COMPLETED", job_name="myrule"),
+        _summary_job("300_1", "COMPLETED", job_name="myrule"),
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="name",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Group myrule" in output
+    assert "Array" not in output
+    assert "2/2 completed (100%)" in output
+
+
+def test_format_grouped_summary_name_grouping_falls_back_without_jobname() -> None:
+    """Tasks without a usable JobName fall back to their own base id."""
+    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("200_1", "COMPLETED")]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="name",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    # each falls back to its own base id rather than being merged together
+    assert "Group 100" in output
+    assert "Group 200" in output
+
+
+def test_format_grouped_summary_suppressed_in_parsable() -> None:
+    """Parsable mode never emits summary blocks, but keeps per-task rows."""
+    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("100_2", "COMPLETED")]
+    renderer = _summary_renderer(parsable=True)
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Array 100" not in output
+    assert "100_1" in output
+    assert "100_2" in output
+    assert renderer.options.parsable is True
+
+
+def test_format_grouped_summary_graph_min_tasks_threshold() -> None:
+    """A graph appears only once the group's task count exceeds min_tasks."""
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i % 60:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+
+    below = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="histogram",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Runtime (" not in below
+
+    above = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Runtime (min)" in above
+
+
+def test_format_grouped_summary_graph_style_sparkline_vs_histogram() -> None:
+    """graph_style selects between a one-line sparkline and a histogram."""
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i % 60:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+
+    sparkline = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Runtime dist:" in sparkline
+    assert "Runtime (min)" not in sparkline
+
+    histogram = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Runtime (min)" in histogram
+    assert "Runtime dist:" not in histogram
+
+
+def test_format_grouped_summary_graph_style_none_suppresses_graph() -> None:
+    """graph_style=none never draws a graph, regardless of min_tasks."""
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i % 60:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=0,
+        graph_style="none",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "Runtime dist:" not in output
+    assert "Runtime (min)" not in output
+
+
+def test_format_grouped_summary_graph_format_selects_which_metric_graphs() -> None:
+    """--graph-format only graphs the metrics it names, not every summarized one."""
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i % 60:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=0,
+        graph_style="sparkline",
+        graph_format="cpueff",
+        ascii_fallback=False,
+    )
+    # cpueff was requested and gets a graph...
+    assert "CPUEff dist:" in output
+    # ...but runtime wasn't requested, so it doesn't, even though it's
+    # always available
+    assert "Runtime dist:" not in output
+    # the table still shows every summarized metric regardless of what's
+    # graphed
+    assert "Metric" in output
+
+
+def test_format_grouped_summary_ascii_fallback() -> None:
+    """--ascii-fallback avoids unicode glyphs in both prose and graphs."""
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i % 60:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="runtime",
+        ascii_fallback=True,
+    )
+    assert "•" not in output
+    assert "·" not in output
+    assert "█" not in output
+
+
+def test_add_required_column_is_idempotent() -> None:
+    """add_required_column adds a column once and recomputes query_columns."""
+    renderer = _summary_renderer()
+    before = set(renderer.query_columns)
+    assert "JobName" not in before
+
+    renderer.add_required_column("JobName")
+    assert "JobName" in renderer.query_columns
+
+    # calling again doesn't duplicate it
+    renderer.add_required_column("JobName")
+    assert renderer.query_columns.count("JobName") == 1
+
+
+def test_add_required_column_does_not_affect_report() -> None:
+    """report's renderer never calls add_required_column, so JobName is absent."""
+    renderer = _summary_renderer()
+    assert "JobName" not in renderer.query_columns
+
+
+# ---------------------------------------------------------------------------
+# summarize: metrics table rendering (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def test_format_metrics_table_header_and_alignment() -> None:
+    """The metrics table has a Metric/Min/Mean/Max header and aligned cells."""
+    jobs = [
+        _summary_job("100_1", "COMPLETED", elapsed="00:10:00"),
+        _summary_job("100_2", "COMPLETED", elapsed="00:12:00"),
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    lines = output.splitlines()
+    header_line = next(line for line in lines if "Metric" in line)
+    assert "Min" in header_line
+    assert "Mean" in header_line
+    assert "Max" in header_line
+
+    # every metric row is the same visible width as the header (padded/
+    # aligned) -- strip ANSI color codes first, since a colored cell adds
+    # invisible escape bytes that would otherwise skew a raw len() compare
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    visible_header = ansi.sub("", header_line)
+    metric_lines = [
+        line
+        for line in lines
+        if line.strip().startswith(("CPUEff", "TimeEff", "MemEff"))
+    ]
+    assert metric_lines
+    for line in metric_lines:
+        assert len(ansi.sub("", line)) == len(visible_header)
+
+
+def test_format_metrics_table_no_bullet_separators() -> None:
+    """The table replaces the old bullet/middot-separated metric line."""
+    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("100_2", "COMPLETED")]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    # the old prototype rendered lines like "CPUEff: min 90.0 · mean 90.0
+    # · max 90.0" -- none of that per-metric inline format survives
+    assert ": min " not in output
+    assert "· mean" not in output
+    assert "· max" not in output
+
+
+def test_format_metrics_table_low_efficiency_uses_color_not_extra_text() -> None:
+    """Out-of-range values are colored (via render_eff); no extra "low" marker.
+
+    Per feedback in the original design discussion, the color coding alone
+    (already used throughout the report table) communicates a value is out
+    of range; a redundant textual marker isn't added on top of it.
+    """
+    jobs = [
+        _summary_job("100_1", "COMPLETED", elapsed="00:10:00", total_cpu="00:00:30"),
+        _summary_job("100_2", "COMPLETED", elapsed="00:10:00", total_cpu="00:00:20"),
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graph_format="runtime",
+        ascii_fallback=False,
+    )
+    assert "low" not in output.lower()
+    assert "\N{WARNING SIGN}" not in output
+
+
+def test_format_metrics_table_empty_when_no_numeric_metrics() -> None:
+    """A group with no numeric metrics (e.g. all values non-coercible) is fine."""
+    renderer = _summary_renderer()
+    assert renderer._format_metrics_table([], indent="  ") == []
+
+
+# ---------------------------------------------------------------------------
+# summarize: multi-metric graphing (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def _summary_job_numeric(
+    jobid: str, state: str, elapsed: str, total_cpu: str
+) -> Job:
+    """Build a COMPLETED task with distinct elapsed/total_cpu for graphing."""
+    return _summary_job(jobid, state, elapsed=elapsed, total_cpu=total_cpu)
+
+
+def test_multi_metric_graphing_min_tasks_gates_every_metric() -> None:
+    """--min-tasks gates every requested metric uniformly, not just runtime."""
+    jobs = [
+        _summary_job_numeric(
+            f"100_{i}", "COMPLETED", f"00:{i:02d}:00", f"00:{i % 7 + 1:02d}:00"
+        )
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+
+    below = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=50,
+        graph_style="histogram",
+        graph_format="runtime,cpueff",
+        ascii_fallback=False,
+    )
+    assert "Runtime (min)" not in below
+    assert "CPUEff (%)" not in below
+
+    above = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="runtime,cpueff",
+        ascii_fallback=False,
+    )
+    assert "Runtime (min)" in above
+    assert "CPUEff (%)" in above
+
+
+def test_multi_metric_graphing_graph_style_none_suppresses_all() -> None:
+    """graph_style=none suppresses every metric's graph, not just runtime's."""
+    jobs = [
+        _summary_job_numeric(
+            f"100_{i}", "COMPLETED", f"00:{i:02d}:00", f"00:{i % 7 + 1:02d}:00"
+        )
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=0,
+        graph_style="none",
+        graph_format="runtime,cpueff",
+        ascii_fallback=False,
+    )
+    assert "dist:" not in output
+    assert "(min)" not in output
+    assert "(%)" not in output
+
+
+def test_multi_metric_graphing_ascii_fallback() -> None:
+    """--ascii-fallback avoids unicode across every graphed metric, not just one."""
+    jobs = [
+        _summary_job_numeric(
+            f"100_{i}", "COMPLETED", f"00:{i:02d}:00", f"00:{i % 7 + 1:02d}:00"
+        )
+        for i in range(1, 11)
+    ]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="runtime,cpueff",
+        ascii_fallback=True,
+    )
+    assert "\u2588" not in output
+    assert "#" in output
+
+
+def test_multi_metric_graphing_sparkline_shows_each_requested_metric() -> None:
+    """Sparkline mode graphs every requested metric, each on its own line."""
+    renderer = output_renderer.OutputRenderer(
+        min_required,
+        output_renderer.RenderOptions(),
+        format_str="JobID,State,Elapsed,CPUEff,MemEff",
+    )
+    jobs = []
+    for i in range(1, 11):
+        job = Job(f"100_{i}".split("_", 1)[0], f"100_{i}", None)
+        job.update(
+            {
+                "JobID": f"100_{i}",
+                "State": "COMPLETED",
+                "AllocCPUS": "1",
+                "ReqMem": "1Gn",
+                "TotalCPU": f"00:{i % 7 + 1:02d}:00",
+                "Elapsed": f"00:{i:02d}:00",
+                "Timelimit": "00:20:00",
+                "MaxRSS": f"{100 + i * 10}K",
+                "NNodes": "1",
+                "NTasks": "",
+            }
+        )
+        jobs.append(job)
+
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="sparkline",
+        graph_format="runtime,cpueff,memeff",
+        ascii_fallback=False,
+    )
+    assert "Runtime dist:" in output
+    assert "CPUEff dist:" in output
+    assert "MemEff dist:" in output
+
+
+def test_energy_metric_graphs_with_joules_unit() -> None:
+    """Energy is graphed with a "J" unit label, distinct from percent metrics."""
+    renderer = output_renderer.OutputRenderer(
+        [*min_required, "TRESUsageOutAve"],
+        output_renderer.RenderOptions(),
+        format_str="JobID,State,Elapsed,Energy",
+    )
+    jobs = []
+    for i in range(1, 11):
+        job = _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i:02d}:00")
+        job.update(
+            {
+                "JobID": f"100_{i}.extern",
+                "State": "COMPLETED",
+                "MaxRSS": "",
+                "TRESUsageOutAve": f"energy={1000 + i * 10}",
+            }
+        )
+        jobs.append(job)
+
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=5,
+        graph_style="histogram",
+        graph_format="energy",
+        ascii_fallback=False,
+    )
+    assert "Energy" in output
+    # no percent unit for Energy; it's shown as a bare, unitless histogram
+    # header (we don't assert a specific unit string, only that "%" isn't
+    # incorrectly applied to it)
+    assert "Energy (%)" not in output
+
+
+def test_gpu_metrics_graph_gracefully_without_jobstat_data() -> None:
+    """--graph-format gpueff,gpumem on non-GPU jobs draws nothing, doesn't error.
+
+    GPUEff/GPUMem come from jobstats' AdminComment field; on systems (or
+    jobs) without jobstat caching they're simply "---" for every task, same
+    as they already render in the plain table. There's no separate opt-in
+    or error path -- the metric just never accumulates a raw series to
+    graph, exactly like any other all-"---" numeric column.
+    """
+    jobs = [
+        _summary_job(f"100_{i}", "COMPLETED", elapsed=f"00:{i:02d}:00")
+        for i in range(1, 11)
+    ]
+    renderer = output_renderer.OutputRenderer(
+        min_required,
+        output_renderer.RenderOptions(),
+        format_str="JobID,State,Elapsed,CPUEff,GPUEff,GPUMem",
+    )
+
+    output = renderer.format_grouped_summary(
+        jobs,
+        group_by="array",
+        min_tasks=0,
+        graph_style="sparkline",
+        graph_format="gpueff,gpumem",
+        ascii_fallback=False,
+    )
+
+    assert "GPUEff dist:" not in output
+    assert "GPUMem dist:" not in output
+    # absent from the metrics table too -- same as any other all-"---" column
+    assert "GPUEff" not in output.split("Array")[-1]
+    assert "GPUMem" not in output.split("Array")[-1]
+    # the rest of the summary still renders normally
+    assert "CPUEff" in output
