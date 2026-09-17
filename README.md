@@ -205,7 +205,9 @@ directory to check for slurm outputs.
 - `--format`: Provide a comma separated list of columns to produce. Prefixing the
   argument with `+` adds the specified values to the defaults.  Values can
   be any valid column name to sacct and the custom efficiency values: TimeEff,
-  cpuEff, MemEff.  Can also optionally set alignment (<, ^, >) and maximum width.
+  cpuEff, MemEff.  `Runtime` is also accepted as an alias for sacct's `Elapsed`,
+  for anyone who'd otherwise have to look up the token name.  Can also
+  optionally set alignment (<, ^, >) and maximum width.
   Default is center-aligned with a width of the maximum column entry.  For
   example, `--format 'jobid%>,state%10,memeff%<5'` produces 3 columns with:
   - JobId aligned right, width set automatically
@@ -233,11 +235,11 @@ directory to check for slurm outputs.
 
 Large array jobs -- or many individually-submitted jobs that happen to share
 a name -- are tedious to eyeball one row at a time. `reportseff summarize`
-groups jobs and appends a compact statistical summary after each group:
-min/mean/max for the columns in `--format`, per-state task counters,
-completion progress, total accumulated task-time, and -- once a group is
-large enough -- a sparkline or histogram showing how a metric is
-distributed across all its tasks.
+groups jobs and, by default, prints a compact statistical summary for each
+group instead of the per-task rows: min/mean/max for the columns in
+`--format`, per-state task counters, completion progress, total accumulated
+task-time, and -- once a group is large enough -- a sparkline or histogram
+showing how a metric is distributed across all its tasks.
 
 `reportseff summarize` takes the same job-selection [arguments](#arguments)
 and most of the same [options](#options) as `reportseff` itself (`--format`,
@@ -260,11 +262,15 @@ and most of the same [options](#options) as `reportseff` itself (`--format`,
   (default 50).  The summary table itself has no such threshold.
 - `--ascii-fallback`: Force ASCII characters instead of Unicode block
   glyphs in graphs, overriding automatic terminal detection.
+- `--tasks/--no-tasks`: Include each task's own row, as in `report`, in
+  addition to the summary block.  Default is `--no-tasks`: only the summary
+  blocks are printed, since running `summarize` for the per-task table
+  alone would be redundant with the default command.
 
 #### Summarizing an array
 
 ```txt
-reportseff summarize 34473805
+reportseff summarize --tasks 34473805
 
 34473805_1    COMPLETED       01:28:00    86.6%    34.4%
 34473805_2    COMPLETED       01:22:00    88.4%    30.7%
@@ -274,12 +280,15 @@ Array 34473805  •  60/60 completed (100%)  •  COMPLETED 60
   Metric      Min   Mean    Max
   CPUEff    85.4%  91.4%  98.6%
   MemEff    29.8%  32.8%  35.8%
-  Total task-time (wall-clock): 85h40m across 60 tasks
-  Mean runtime: COMPLETED 1h25m
+  Total task-time (wall-clock): 3-13:40:00 across 60 tasks
+  Mean runtime: COMPLETED 01:25:00
   Runtime dist: ▅▃▄▃▄▄▃█▅▄ (n=60, 78-92 min)
   CPUEff dist: █▅▇▆▂▆▅▅▃▆ (n=60, 85-99%)
   MemEff dist: ▆▄█▄▆▄▅▆▆▆ (n=60, 30-36%)
 ```
+
+Without `--tasks` (the default), only the `Array 34473805 ...` block and
+below is printed -- the per-task rows above it are omitted.
 
 #### Grouping by job name
 
