@@ -5,6 +5,11 @@ import :mod:`reportseff.output_renderer`, so that the renderer can import from
 here without creating a circular dependency.  It returns structured numeric
 data and plain (uncolored) strings; the renderer is responsible for applying
 colors and final layout.
+
+The histogram/sparkline renderer below is deliberately dependency-free (no
+``plotext``/``hist``/etc.): it keeps reportseff's runtime dependency
+footprint at just ``click``, avoiding an extra package to audit/maintain for
+what is a small, self-contained, fully-tested piece of rendering logic.
 """
 
 from __future__ import annotations
@@ -22,10 +27,6 @@ if TYPE_CHECKING:
 
 #: Titles that are handled specially and never treated as generic metrics.
 _EXCLUDE_TITLES = {"jobid", "jobidraw", "state", "elapsed"}
-#: The title (case-insensitive) whose values are collapsed into a hostlist.
-_NODELIST_TITLE = "nodelist"
-#: State considered "completed" for completed-only efficiency statistics.
-COMPLETED_STATE = "COMPLETED"
 #: Minimum number of tasks for a group to be treated as an array.
 _MIN_ARRAY_TASKS = 2
 
@@ -44,7 +45,10 @@ def parse_graph_format(value: str) -> tuple[str, ...]:
         value: the raw, comma-separated, case-insensitive metric list
 
     Returns:
-        A de-duplicated, order-preserving tuple of lowercased metric names.
+        A de-duplicated tuple of lowercased metric names, sorted for a
+        stable/deterministic result. Callers only need set membership (see
+        ``output_renderer.format_grouped_summary``), so input order is not
+        preserved.
 
     Raises:
         ValueError: if any token isn't a recognized metric name.
@@ -58,13 +62,7 @@ def parse_graph_format(value: str) -> tuple[str, ...]:
         )
         raise ValueError(msg)
 
-    seen: set[str] = set()
-    result: list[str] = []
-    for token in tokens:
-        if token not in seen:
-            seen.add(token)
-            result.append(token)
-    return tuple(result)
+    return tuple(sorted(set(tokens)))
 
 #: Horizontal block characters at 1/8 resolution, index 0 (empty) .. 8 (full).
 _EIGHTHS_H = " ▏▎▍▌▋▊▉█"
@@ -174,12 +172,11 @@ def group_jobs_by_name(jobs: list[Job]) -> list[tuple[str, list[Job]]]:
 def is_array_group(tasks: list[Job]) -> bool:
     """Return True if the group is large enough to warrant a summary block.
 
-    Used for both ``--group-by=array`` and ``--group-by=name``: a group
-    qualifies either by having more than one task, or -- for the array case
-    specifically -- by a single task's jobid already showing array syntax
-    (e.g. a lone ``123_1``).
+    Applies uniformly to both ``--group-by=array`` and ``--group-by=name``:
+    a group needs at least ``_MIN_ARRAY_TASKS`` tasks, regardless of whether
+    a lone task's jobid happens to look like an array task (e.g. ``123_1``).
     """
-    return len(tasks) >= _MIN_ARRAY_TASKS or any("_" in job.jobid for job in tasks)
+    return len(tasks) >= _MIN_ARRAY_TASKS
 
 
 def _coerce_float(value: object) -> float | None:
@@ -237,7 +234,7 @@ def build_array_summary(
     summary = ArraySummary(
         base_id=base_id,
         total_tasks=len(tasks),
-        completed_tasks=sum(1 for job in tasks if job.state == COMPLETED_STATE),
+        completed_tasks=sum(1 for job in tasks if job.state == "COMPLETED"),
     )
 
     # state counters
@@ -245,7 +242,7 @@ def build_array_summary(
         state = job.state or "UNKNOWN"
         summary.state_counts[state] = summary.state_counts.get(state, 0) + 1
 
-    completed = [job for job in tasks if job.state == COMPLETED_STATE]
+    completed = [job for job in tasks if job.state == "COMPLETED"]
 
     # runtime aggregation (all tasks that have a parseable elapsed time)
     per_state_seconds: dict[str, list[int]] = {}
@@ -271,7 +268,7 @@ def build_array_summary(
             continue
         seen.add(fold)
 
-        if fold == _NODELIST_TITLE:
+        if fold == "nodelist":
             summary.node_hostlist = _summarize_nodes(tasks, title)
             continue
 
@@ -324,23 +321,24 @@ def _summarize_nodes(tasks: list[Job], title: str) -> str | None:
     return compact_hostlist(names)
 
 
+#: Matches a comma that is not enclosed within a following ``]`` -- i.e. a
+#: top-level separator rather than one inside a bracketed range list.
+_TOP_LEVEL_COMMA_RE = re.compile(r",(?![^\[]*\])")
+
+
 def _split_top_level(value: str) -> list[str]:
-    """Split a hostlist string on commas that are not inside brackets."""
-    tokens: list[str] = []
-    depth = 0
-    current = ""
-    for char in value:
-        if char == "[":
-            depth += 1
-        elif char == "]":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            tokens.append(current)
-            current = ""
-        else:
-            current += char
-    if current:
-        tokens.append(current)
+    """Split a hostlist string on commas that are not inside brackets.
+
+    Ill-formed input (e.g. an unclosed bracket) degrades gracefully rather
+    than raising: a comma with no later closing bracket is treated as
+    top-level, and the resulting token then simply fails to match
+    ``_HOSTLIST_RE`` in :func:`expand_hostlist`, so it is kept verbatim.
+    """
+    if not value:
+        return []
+    tokens = _TOP_LEVEL_COMMA_RE.split(value)
+    if tokens[-1] == "":
+        tokens.pop()
     return tokens
 
 
@@ -388,6 +386,11 @@ def compact_hostlist(names: set[str] | list[str]) -> str:
     consecutive numeric suffixes collapsed into ``lo-hi`` ranges, e.g.::
 
         somacpu[001-088,101-124],somagpu[001-093]
+
+    Names with the same prefix but a *different* zero-pad width (e.g.
+    ``node1``..``node4`` vs. ``node09``..``node11``) are kept in separate
+    bracket groups rather than merged, since collapsing them would lose or
+    misrepresent the padding: ``node[1-4],node[09-11]``.
 
     Args:
         names: the set/list of individual node names
@@ -443,15 +446,18 @@ def _format_range(start: int, end: int, width: int) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Render a duration in a compact ``h/m/s`` form (e.g. ``1h12m``)."""
+    """Render a duration as sacct-style ``HH:MM:SS`` (``D-HH:MM:SS`` if >= 1 day).
+
+    Matches how ``Elapsed`` itself is displayed elsewhere in reportseff,
+    rather than introducing a second, compact duration notation.
+    """
     total = round(seconds)
-    hours, remainder = divmod(total, 3600)
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
     minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h{minutes:02d}m"
-    if minutes:
-        return f"{minutes}m{secs:02d}s"
-    return f"{secs}s"
+    if days:
+        return f"{days}-{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def compute_histogram(

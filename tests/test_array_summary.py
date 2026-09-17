@@ -9,18 +9,19 @@ import pytest
 from reportseff import array_summary as summ
 from reportseff.job import Job
 
+#: Default field values for _make_job, overridden per-test via **overrides.
+_JOB_DEFAULTS = {
+    "elapsed": "00:10:00",
+    "total_cpu": "00:09:00",
+    "partition": "CPU",
+    "nodelist": "somacpu001",
+    "job_name": "",
+}
 
-def _make_job(  # noqa: PLR0913
-    jobid: str,
-    state: str,
-    elapsed: str = "00:10:00",
-    total_cpu: str = "00:09:00",
-    *,
-    partition: str = "CPU",
-    nodelist: str = "somacpu001",
-    job_name: str = "",
-) -> Job:
+
+def _make_job(jobid: str, state: str, **overrides: str) -> Job:
     """Build a Job via the normal update path for testing."""
+    values = {**_JOB_DEFAULTS, **overrides}
     base = jobid.split("_", 1)[0]
     job = Job(base, jobid, None)
     entry = {
@@ -28,17 +29,17 @@ def _make_job(  # noqa: PLR0913
         "State": state,
         "AllocCPUS": "1",
         "ReqMem": "1Gn",
-        "TotalCPU": total_cpu,
-        "Elapsed": elapsed,
+        "TotalCPU": values["total_cpu"],
+        "Elapsed": values["elapsed"],
         "Timelimit": "00:20:00",
         "MaxRSS": "",
         "NNodes": "1",
         "NTasks": "",
-        "Partition": partition,
-        "NodeList": nodelist,
+        "Partition": values["partition"],
+        "NodeList": values["nodelist"],
     }
-    if job_name:
-        entry["JobName"] = job_name
+    if values["job_name"]:
+        entry["JobName"] = values["job_name"]
     job.update(entry)
     return job
 
@@ -63,8 +64,8 @@ def test_group_jobs_by_array_preserves_order() -> None:
 
 
 def test_is_array_group() -> None:
-    """Array groups need >=2 tasks or an underscore in the jobid."""
-    assert summ.is_array_group([_make_job("1_1", "COMPLETED")])
+    """A group needs >=2 tasks; a lone array-looking jobid isn't enough."""
+    assert not summ.is_array_group([_make_job("1_1", "COMPLETED")])
     assert summ.is_array_group(
         [_make_job("1_1", "COMPLETED"), _make_job("1_2", "COMPLETED")]
     )
@@ -82,6 +83,21 @@ def test_group_jobs_by_name_preserves_order() -> None:
     assert [name for name, _ in grouped] == ["alpha", "beta"]
     assert [j.jobid for j in grouped[0][1]] == ["100_1", "100_2"]
     assert [j.jobid for j in grouped[1][1]] == ["200_1"]
+
+
+def test_group_jobs_by_name_preserves_order_when_swapped() -> None:
+    """Swapping the first two jobs' order changes the grouped order too.
+
+    Proves group order is actually derived from input order rather than
+    being coincidentally alphabetical or otherwise fixed.
+    """
+    jobs = [
+        _make_job("200_1", "COMPLETED", job_name="beta"),
+        _make_job("100_1", "COMPLETED", job_name="alpha"),
+        _make_job("100_2", "COMPLETED", job_name="alpha"),
+    ]
+    grouped = summ.group_jobs_by_name(jobs)
+    assert [name for name, _ in grouped] == ["beta", "alpha"]
 
 
 def test_group_jobs_by_name_falls_back_to_base_id() -> None:
@@ -127,22 +143,22 @@ def test_graph_format_vocabulary_contents() -> None:
 
 
 def test_parse_graph_format_basic() -> None:
-    """Values are comma-split, case-folded, deduped, and order-preserving."""
+    """Values are comma-split, case-folded, deduped, and sorted."""
     assert summ.parse_graph_format("Runtime, CPUEff,runtime") == (
-        "runtime",
         "cpueff",
+        "runtime",
     )
 
 
 def test_parse_graph_format_empty_tokens_ignored() -> None:
     """Blank tokens (e.g. a trailing comma) are dropped rather than erroring."""
-    assert summ.parse_graph_format("runtime,,cpueff,") == ("runtime", "cpueff")
+    assert summ.parse_graph_format("runtime,,cpueff,") == ("cpueff", "runtime")
 
 
 def test_parse_graph_format_full_vocabulary_accepted() -> None:
     """Every recognized metric name parses without error."""
     value = ",".join(summ.GRAPH_FORMAT_VOCABULARY)
-    assert summ.parse_graph_format(value) == summ.GRAPH_FORMAT_VOCABULARY
+    assert summ.parse_graph_format(value) == tuple(sorted(summ.GRAPH_FORMAT_VOCABULARY))
 
 
 def test_parse_graph_format_unknown_metric_raises() -> None:
@@ -336,6 +352,17 @@ def test_split_top_level_trailing_comma() -> None:
     assert summ._split_top_level("nodeA,nodeB,") == ["nodeA", "nodeB"]
 
 
+def test_expand_hostlist_unclosed_bracket_kept_verbatim() -> None:
+    """An unclosed bracket doesn't crash; the token is kept as-is."""
+    assert summ.expand_hostlist("node[1-2") == ["node[1-2"]
+    assert summ.expand_hostlist("node[1-2,nodeB") == ["node[1-2", "nodeB"]
+
+
+def test_expand_hostlist_non_numeric_range_kept_verbatim() -> None:
+    """A bracketed range that isn't purely numeric is kept as-is."""
+    assert summ.expand_hostlist("node[a-b]") == ["node[a-b]"]
+
+
 def test_compact_hostlist_multi_prefix() -> None:
     """Names collapse into per-prefix ranges."""
     names = [
@@ -358,6 +385,14 @@ def test_compact_hostlist_single_node() -> None:
 def test_compact_hostlist_non_numeric_verbatim() -> None:
     """Names without a numeric suffix are kept verbatim."""
     assert summ.compact_hostlist(["login", "gateway"]) == "gateway,login"
+
+
+def test_compact_hostlist_mixed_zero_pad_width_kept_separate() -> None:
+    """Same prefix, different zero-pad width -> two separate range groups."""
+    names = ["node1", "node2", "node3", "node4", "node09", "node10", "node11"]
+    result = summ.compact_hostlist(names)
+    assert "node[1-4]" in result
+    assert "node[09-11]" in result
 
 
 def test_hostlist_roundtrip() -> None:
@@ -463,7 +498,8 @@ def test_render_sparkline_zero_max_count_guard() -> None:
 
 
 def test_format_duration() -> None:
-    """Durations render compactly in h/m/s."""
-    assert summ.format_duration(4335) == "1h12m"
-    assert summ.format_duration(450) == "7m30s"
-    assert summ.format_duration(30) == "30s"
+    """Durations render as sacct-style HH:MM:SS, or D-HH:MM:SS past a day."""
+    assert summ.format_duration(4335) == "01:12:15"
+    assert summ.format_duration(450) == "00:07:30"
+    assert summ.format_duration(30) == "00:00:30"
+    assert summ.format_duration(90000) == "1-01:00:00"
