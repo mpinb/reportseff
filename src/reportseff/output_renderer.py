@@ -8,7 +8,7 @@ import locale
 import re
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import click
 
@@ -26,7 +26,7 @@ from .array_summary import (
 from .job import Job, state_colors
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Iterable
 
 #: Regex for format tokens, NAME[%[ALIGNMENT][WIDTH[e?]]]
 FORMAT_RE = re.compile(
@@ -70,6 +70,11 @@ def _summary_target_type(title: str) -> str | None:
     return None
 
 
+def _size_summary_column(column: ColumnFormatter, entries: Iterable[str]) -> None:
+    """Set a summary-table column's width from its title and rendered entries."""
+    column.width = max(len(column.title), *(len(entry) for entry in entries)) + 2
+
+
 @dataclass
 class RenderOptions:
     """Data class for holding output rendering options.
@@ -90,6 +95,48 @@ class RenderOptions:
         """Post init method to handle delimiter and parsable."""
         if not self.parsable:
             self.delimiter = " "
+
+
+@dataclass
+class SummaryOptions:
+    """Options controlling `summarize`'s grouped-summary rendering.
+
+    Args:
+        group_by: "array" (base job id) or "name" (sacct JobName)
+        min_tasks: minimum tasks in a group before a graph is drawn
+        graph_style: "sparkline", "histogram", or "none"
+        graph_format: comma-separated, case-insensitive metrics to graph
+        ascii_fallback: force ASCII glyphs, overriding auto-detection
+        tasks: whether to include each task's own row, in addition to the
+            summary block, for every qualifying group
+    """
+
+    group_by: str = "array"
+    min_tasks: int = 50
+    graph_style: str = "sparkline"
+    graph_format: str = "runtime,cpueff,memeff"
+    ascii_fallback: bool = False
+    tasks: bool = False
+
+
+@dataclass
+class _SummaryRenderState:
+    """Values derived once per `format_grouped_summary` call.
+
+    Threaded through the per-group/per-metric rendering helpers instead of
+    passing `min_tasks`/`graph_style`/`graphed`/`use_unicode` as separate
+    keyword arguments to each of them.
+    """
+
+    label: str
+    min_tasks: int
+    graph_style: str
+    graphed: set[str]
+    use_unicode: bool
+
+
+#: Leading whitespace for every summary-block line below the header.
+_SUMMARY_INDENT = "  "
 
 
 class OutputRenderer:
@@ -266,33 +313,22 @@ class OutputRenderer:
             )
         return delimiter.join(fmt.format_job(job) for fmt in self.formatters).rstrip()
 
-    def format_grouped_summary(  # noqa: PLR0913
-        self,
-        jobs: list[Job],
-        *,
-        group_by: str,
-        min_tasks: int,
-        graph_style: str,
-        graph_format: str,
-        ascii_fallback: bool,
-    ) -> str:
+    def format_grouped_summary(self, jobs: list[Job], options: SummaryOptions) -> str:
         """Render jobs grouped by array id or job name, each with a summary.
 
-        This is `summarize`'s top-level rendering entry point: per-task rows
-        (via `_format_single_job`, same as `report`), followed by a summary
-        block for any group with more than one task. Which columns get
-        summarized is driven implicitly by `self.formatters` -- the same
-        columns `--format` would otherwise display -- not by a separate
-        selector; `graph_format` only narrows which of those additionally
-        get a sparkline/histogram.
+        This is `summarize`'s top-level rendering entry point: a summary
+        block for any group with more than one task, optionally preceded by
+        each task's own row (via `_format_single_job`, same as `report`,
+        when `options.tasks` is set). Which columns get summarized is
+        driven implicitly by `self.formatters` -- the same columns
+        `--format` would otherwise display -- not by a separate selector;
+        `options.graph_format` only narrows which of those additionally get
+        a sparkline/histogram.
 
         Args:
             jobs: the jobs to render, already sorted
-            group_by: "array" (base job id) or "name" (sacct JobName)
-            min_tasks: minimum tasks in a group before a graph is drawn
-            graph_style: "sparkline", "histogram", or "none"
-            graph_format: comma-separated, case-insensitive metrics to graph
-            ascii_fallback: force ASCII glyphs, overriding auto-detection
+            options: rendering options for grouping, graphing, and whether
+                to include per-task rows
 
         Returns:
             The rendered, colored output string. In `--parsable` mode, only
@@ -301,46 +337,36 @@ class OutputRenderer:
             so it's suppressed there, same as the original array-summary
             prototype did.
         """
-        grouping = group_jobs_by_name if group_by == "name" else group_jobs_by_array
-        label = "Group" if group_by == "name" else "Array"
+        grouping = (
+            group_jobs_by_name if options.group_by == "name" else group_jobs_by_array
+        )
         titles = [fmt.title for fmt in self.formatters]
-        graphed = set(parse_graph_format(graph_format))
-        use_unicode = SUPPORTS_UNICODE and not ascii_fallback
+        state = _SummaryRenderState(
+            label="Group" if options.group_by == "name" else "Array",
+            min_tasks=options.min_tasks,
+            graph_style=options.graph_style,
+            graphed=set(parse_graph_format(options.graph_format)),
+            use_unicode=SUPPORTS_UNICODE and not options.ascii_fallback,
+        )
 
         lines: list[str] = []
         for base, tasks in grouping(jobs):
-            lines.extend(self._format_single_job(job) for job in tasks)
+            if options.tasks:
+                lines.extend(self._format_single_job(job) for job in tasks)
             if is_array_group(tasks) and not self.options.parsable:
-                lines.extend(
-                    self._format_summary_block(
-                        base,
-                        tasks,
-                        titles,
-                        label=label,
-                        min_tasks=min_tasks,
-                        graph_style=graph_style,
-                        graphed=graphed,
-                        use_unicode=use_unicode,
-                    )
-                )
+                lines.extend(self._format_summary_block(base, tasks, titles, state))
         return "\n".join(lines)
 
-    def _format_summary_block(  # noqa: PLR0913
+    def _format_summary_block(
         self,
         base: str,
         tasks: list[Job],
         titles: list[str],
-        *,
-        label: str,
-        min_tasks: int,
-        graph_style: str,
-        graphed: set[str],
-        use_unicode: bool,
+        state: _SummaryRenderState,
     ) -> list[str]:
         """Build the colored, human-readable summary lines for one group."""
         summary = build_array_summary(base, tasks, titles)
-        indent = "  "
-        bullet = "•" if use_unicode else "|"
+        bullet = "•" if state.use_unicode else "|"
         lines: list[str] = []
 
         # header: id/name, completion progress, state counters
@@ -349,26 +375,26 @@ class OutputRenderer:
             if summary.total_tasks
             else 0
         )
-        header = click.style(f"{label} {base}", bold=True)
+        header = click.style(f"{state.label} {base}", bold=True)
         header += (
             f"  {bullet}  {summary.completed_tasks}/{summary.total_tasks}"
             f" completed ({pct}%)"
         )
         counters = f"  {bullet}  ".join(
-            click.style(f"{state} {count}", fg=state_colors.get(state))
-            for state, count in sorted(summary.state_counts.items())
+            click.style(f"{state_name} {count}", fg=state_colors.get(state_name))
+            for state_name, count in sorted(summary.state_counts.items())
         )
         if counters:
             header += f"  {bullet}  {counters}"
         lines.append(header)
 
         # per-metric min/mean/max, as an aligned table
-        lines.extend(self._format_metrics_table(summary.metrics, indent=indent))
+        lines.extend(self._format_metrics_table(summary.metrics))
 
         # total accumulated wall-clock runtime across all tasks
         if summary.total_task_seconds > 0:
             lines.append(
-                f"{indent}Total task-time (wall-clock): "
+                f"{_SUMMARY_INDENT}Total task-time (wall-clock): "
                 f"{format_duration(summary.total_task_seconds)}"
                 f" across {summary.total_tasks} tasks"
             )
@@ -376,48 +402,45 @@ class OutputRenderer:
         # per-state mean runtime
         if summary.per_state_mean_seconds:
             parts = f"  {bullet}  ".join(
-                f"{click.style(state, fg=state_colors.get(state))}"
+                f"{click.style(state_name, fg=state_colors.get(state_name))}"
                 f" {format_duration(seconds)}"
-                for state, seconds in sorted(summary.per_state_mean_seconds.items())
+                for state_name, seconds in sorted(
+                    summary.per_state_mean_seconds.items()
+                )
             )
-            lines.append(f"{indent}Mean runtime: {parts}")
+            lines.append(f"{_SUMMARY_INDENT}Mean runtime: {parts}")
 
         # shared metadata (constant across all tasks)
         if summary.shared_values:
             shared = ", ".join(
                 f"{title}={value}" for title, value in summary.shared_values
             )
-            lines.append(f"{indent}Shared: {shared}")
+            lines.append(f"{_SUMMARY_INDENT}Shared: {shared}")
 
         # heterogeneous metadata
         lines.extend(
-            f"{indent}{title}: {', '.join(values)}"
+            f"{_SUMMARY_INDENT}{title}: {', '.join(values)}"
             for title, values in summary.unique_values
         )
 
         # collapsed node hostlist
         if summary.node_hostlist:
-            lines.append(f"{indent}Nodes: {summary.node_hostlist}")
+            lines.append(f"{_SUMMARY_INDENT}Nodes: {summary.node_hostlist}")
 
         # distribution graphs (sparkline/histogram) for each requested
         # --graph-format metric, once the group is large enough. "runtime"
         # graphs summary.elapsed_minutes (always retained, independent of
         # --format); every other vocabulary entry graphs the matching
         # MetricStat's raw per-task values.
-        if graph_style != "none" and summary.total_tasks > min_tasks:
-            if "runtime" in graphed and summary.elapsed_minutes:
+        if state.graph_style != "none" and summary.total_tasks > state.min_tasks:
+            if "runtime" in state.graphed and summary.elapsed_minutes:
                 lines.extend(
                     self._format_metric_graph(
-                        "Runtime",
-                        summary.elapsed_minutes,
-                        unit="min",
-                        graph_style=graph_style,
-                        use_unicode=use_unicode,
-                        indent=indent,
+                        "Runtime", summary.elapsed_minutes, "min", state
                     )
                 )
             for metric in summary.metrics:
-                if metric.title.casefold() not in graphed or not metric.values:
+                if metric.title.casefold() not in state.graphed or not metric.values:
                     continue
                 unit = (
                     "%"
@@ -428,26 +451,18 @@ class OutputRenderer:
                 )
                 lines.extend(
                     self._format_metric_graph(
-                        metric.title,
-                        metric.values,
-                        unit=unit,
-                        graph_style=graph_style,
-                        use_unicode=use_unicode,
-                        indent=indent,
+                        metric.title, metric.values, unit, state
                     )
                 )
 
         return lines
 
-    def _format_metric_graph(  # noqa: PLR0913
+    def _format_metric_graph(
         self,
         label: str,
         values: list[float],
-        *,
         unit: str,
-        graph_style: str,
-        use_unicode: bool,
-        indent: str,
+        state: _SummaryRenderState,
     ) -> list[str]:
         """Render one metric's distribution as a sparkline or a histogram.
 
@@ -455,10 +470,10 @@ class OutputRenderer:
             label: the metric name shown in the graph, e.g. "Runtime", "CPUEff"
             values: the raw per-task values to bin
             unit: unit suffix -- "min", "%", "J", or "" when none is known
-            graph_style: "sparkline" or "histogram" ("none" is filtered by
-                the caller before this is reached)
-            use_unicode: whether to use Unicode block characters
-            indent: leading whitespace applied to every line
+            state: the render state for this `format_grouped_summary` call
+                (only `graph_style` and `use_unicode` are used here; `state`
+                is passed as a whole rather than as separate arguments since
+                the caller already has it)
 
         Returns:
             The rendered lines, or an empty list when there are no values.
@@ -466,39 +481,35 @@ class OutputRenderer:
         if not values:
             return []
 
-        if graph_style == "sparkline":
+        if state.graph_style == "sparkline":
             spark = render_sparkline(values)
             low = round(min(values))
             high = round(max(values))
             suffix = unit if unit == "%" else (f" {unit}" if unit else "")
             return [
-                f"{indent}{label} dist: {spark}"
+                f"{_SUMMARY_INDENT}{label} dist: {spark}"
                 f" (n={len(values)}, {low}-{high}{suffix})"
             ]
 
         return [
-            indent + line
+            _SUMMARY_INDENT + line
             for line in render_histogram(
-                values, ascii_only=not use_unicode, unit=unit, label=label
+                values, ascii_only=not state.use_unicode, unit=unit, label=label
             )
         ]
 
-    def _format_metrics_table(
-        self, metrics: list[MetricStat], *, indent: str
-    ) -> list[str]:
+    def _format_metrics_table(self, metrics: list[MetricStat]) -> list[str]:
         """Render the per-metric min/mean/max stats as an aligned table.
 
         Reuses ColumnFormatter for width, alignment, and coloring instead of
-        the original prototype's hand-rolled, bullet-separated line per
-        metric. Out-of-range values are still flagged, but only via the
-        same per-cell coloring the main report table already uses (each of
-        min/mean/max is colored independently) -- there's no extra "low"
-        marker glyph alongside it, since the color alone already
-        communicates it without adding unicode/ASCII-dependent text.
+        a hand-rolled, bullet-separated line per metric. Out-of-range
+        values are still flagged, but only via the same per-cell coloring
+        the main report table already uses (each of min/mean/max is colored
+        independently) -- there's no extra "low" marker glyph alongside it,
+        since the color alone already communicates it.
 
         Args:
             metrics: the per-metric min/mean/max stats to render
-            indent: leading whitespace applied to every line
 
         Returns:
             The table as a list of lines (header + one row per metric), or
@@ -527,10 +538,10 @@ class OutputRenderer:
         min_col = ColumnFormatter("Min%>")
         mean_col = ColumnFormatter("Mean%>")
         max_col = ColumnFormatter("Max%>")
-        metric_col.width = max(len(metric_col.title), *(len(r[0]) for r in rows)) + 2
-        min_col.width = max(len(min_col.title), *(len(r[1][0]) for r in rows)) + 2
-        mean_col.width = max(len(mean_col.title), *(len(r[2][0]) for r in rows)) + 2
-        max_col.width = max(len(max_col.title), *(len(r[3][0]) for r in rows)) + 2
+        _size_summary_column(metric_col, (r[0] for r in rows))
+        _size_summary_column(min_col, (r[1][0] for r in rows))
+        _size_summary_column(mean_col, (r[2][0] for r in rows))
+        _size_summary_column(max_col, (r[3][0] for r in rows))
 
         header = (
             metric_col.format_title()
@@ -538,10 +549,10 @@ class OutputRenderer:
             + mean_col.format_title()
             + max_col.format_title()
         )
-        lines = [indent + header]
+        lines = [_SUMMARY_INDENT + header]
         for title, (min_t, min_c), (mean_t, mean_c), (max_t, max_c) in rows:
             lines.append(
-                indent
+                _SUMMARY_INDENT
                 + metric_col.format_entry(title)
                 + min_col.format_entry(min_t, min_c)
                 + mean_col.format_entry(mean_t, mean_c)
@@ -552,6 +563,11 @@ class OutputRenderer:
 
 class ColumnFormatter:
     """A single column formatting object."""
+
+    #: --format tokens accepted as synonyms for a real sacct/derived title.
+    #: "Runtime" is a friendlier alias for sacct's "Elapsed" -- the value
+    #: itself is unchanged, only the accepted input spelling is widened.
+    _TITLE_ALIASES: ClassVar[dict[str, str]] = {"runtime": "Elapsed"}
 
     __hash__: None = None  # type: ignore[assignment]
 
@@ -642,7 +658,8 @@ class ColumnFormatter:
         Raises:
             ValueError: if self.title is not found in the valid list
         """
-        fold_title = self.title.casefold()
+        alias = self._TITLE_ALIASES.get(self.title.casefold())
+        fold_title = (alias or self.title).casefold()
         for title in itertools.chain(valid_titles, derived_titles):
             if fold_title == title.casefold():
                 self.title = title

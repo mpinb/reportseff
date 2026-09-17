@@ -11,7 +11,7 @@ import click
 from . import __version__
 from .db_inquirer import BaseInquirer, SacctInquirer
 from .job_collection import JobCollection
-from .output_renderer import OutputRenderer, RenderOptions
+from .output_renderer import OutputRenderer, RenderOptions, SummaryOptions
 from .parameters import BaseQueryParameters, ReportseffParameters, SummarizeParameters
 
 MAX_ENTRIES_TO_ECHO = 20
@@ -24,11 +24,11 @@ DEFAULT_COMMAND_NAME = "report"
 class DefaultGroup(click.Group):
     """A click.Group that falls back to a default subcommand.
 
-    Lets ``reportseff <args>`` keep behaving exactly as it did before this
-    project gained subcommands: any invocation whose first token isn't a
-    registered subcommand name (and isn't ``--help``/``--version``, which
-    stay at the group level so they list/identify the tool as a whole) is
-    treated as arguments to the default command instead.
+    Any invocation whose first token isn't a registered subcommand name (and
+    isn't ``--help``/``--version``, which stay at the group level so they
+    list/identify the tool as a whole) is treated as arguments to the
+    default command instead, so ``reportseff <args>`` needs no subcommand
+    keyword.
 
     Note: this means a bare positional argument that happens to exactly
     match a subcommand name (e.g. a job file literally named ``report``)
@@ -311,15 +311,21 @@ def main(**kwargs: Any) -> None:
     help="Force ASCII output, overriding the automatic Unicode-support "
     "detection normally used for summary glyphs and graphs.",
 )
+@click.option(
+    "--tasks/--no-tasks",
+    default=False,
+    help="Include each task's own row in addition to the summary block "
+    "(default: summary blocks only).",
+)
 @click.argument("jobs", nargs=-1)
 def summarize(**kwargs: Any) -> None:
     """Summarize jobs grouped by array id or job name.
 
-    Prints each task's row (like `report`), followed by a summary block for
-    any group with more than one task: state counters, completion progress,
-    min/mean/max for the currently-displayed efficiency columns, total
-    task-time, and -- for large enough groups -- a runtime distribution
-    graph.
+    For any group with more than one task, prints a summary block: state
+    counters, completion progress, min/mean/max for the currently-displayed
+    efficiency columns, total task-time, and -- for large enough groups --
+    a runtime distribution graph. Each task's own row (as in `report`) is
+    included only when `--tasks` is passed.
     """
     try:
         args = SummarizeParameters(**kwargs)
@@ -345,10 +351,6 @@ def fetch_job_collection(
     This is the "querying slurm, building the datatable" pipeline shared by
     both the default `report` command and `summarize`: everything up to and
     including sorting, before either command renders its own output shape.
-
-    Typed against BaseQueryParameters (not ReportseffParameters) since both
-    ReportseffParameters and SummarizeParameters are passed here, and only
-    share a common ancestor, not a subtype relationship.
 
     Args:
         args: parsed command-line parameters (job selection/filtering options)
@@ -468,11 +470,14 @@ def get_summary(args: SummarizeParameters) -> tuple[str, int]:
 
     output = renderer.format_grouped_summary(
         found_jobs,
-        group_by=args.group_by,
-        min_tasks=args.min_tasks,
-        graph_style=args.graph_style,
-        graph_format=args.graph_format,
-        ascii_fallback=args.ascii_fallback,
+        SummaryOptions(
+            group_by=args.group_by,
+            min_tasks=args.min_tasks,
+            graph_style=args.graph_style,
+            graph_format=args.graph_format,
+            ascii_fallback=args.ascii_fallback,
+            tasks=args.tasks,
+        ),
     )
     return output, len(found_jobs)
 

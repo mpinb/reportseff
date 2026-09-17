@@ -58,6 +58,7 @@ class SummarizeParameters(BaseQueryParameters):
     graph_format: str = "runtime,cpueff,memeff"
     min_tasks: int = 50
     ascii_fallback: bool = False
+    tasks: bool = False
 
     def __post_init__(self) -> None:
         """Apply the shared format_str convenience, then validate graph_format.

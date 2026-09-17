@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 import pytest
@@ -656,6 +656,17 @@ def test_formatter_validate_title() -> None:
     assert fmt.title == "ReqMem"
 
 
+def test_formatter_validate_title_runtime_is_elapsed_alias() -> None:
+    """'Runtime' resolves to sacct's real 'Elapsed' title, case-insensitively."""
+    fmt = output_renderer.ColumnFormatter("Runtime")
+    assert fmt.validate_title(["Elapsed", "JobID"], []) == "Elapsed"
+    assert fmt.title == "Elapsed"
+
+    fmt = output_renderer.ColumnFormatter("RUNTIME")
+    assert fmt.validate_title(["Elapsed", "JobID"], []) == "Elapsed"
+    assert fmt.title == "Elapsed"
+
+
 def test_formatter_validate_title_totals() -> None:
     """Can validate titles against a column formatter that start with Total."""
     # total cpu is from sacct and will short any total logic
@@ -783,6 +794,19 @@ def _summary_job(
     return job
 
 
+def _summary_options(**overrides: Any) -> output_renderer.SummaryOptions:
+    """Build a SummaryOptions with test-friendly defaults, overridden as needed."""
+    defaults: dict[str, Any] = {
+        "group_by": "array",
+        "min_tasks": 50,
+        "graph_style": "sparkline",
+        "graph_format": "runtime",
+        "ascii_fallback": False,
+    }
+    defaults.update(overrides)
+    return output_renderer.SummaryOptions(**defaults)
+
+
 def test_format_grouped_summary_array_grouping() -> None:
     """--group-by=array groups by base id and labels the block 'Array'."""
     jobs = [
@@ -793,11 +817,13 @@ def test_format_grouped_summary_array_grouping() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Array 100" in output
     # singleton 200 gets no summary block
@@ -814,11 +840,13 @@ def test_format_grouped_summary_name_grouping() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="name",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="name",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Group myrule" in output
     assert "Array" not in output
@@ -827,19 +855,46 @@ def test_format_grouped_summary_name_grouping() -> None:
 
 def test_format_grouped_summary_name_grouping_falls_back_without_jobname() -> None:
     """Tasks without a usable JobName fall back to their own base id."""
-    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("200_1", "COMPLETED")]
+    jobs = [
+        _summary_job("100_1", "COMPLETED"),
+        _summary_job("100_2", "COMPLETED"),
+        _summary_job("200_1", "COMPLETED"),
+        _summary_job("200_2", "COMPLETED"),
+    ]
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="name",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="name",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     # each falls back to its own base id rather than being merged together
     assert "Group 100" in output
     assert "Group 200" in output
+
+
+def test_format_grouped_summary_tasks_default_suppresses_rows() -> None:
+    """By default (tasks=False), only the summary block is shown."""
+    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("100_2", "COMPLETED")]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(jobs, _summary_options())
+    assert "100_1" not in output
+    assert "100_2" not in output
+    assert "Array 100" in output
+
+
+def test_format_grouped_summary_tasks_true_includes_rows() -> None:
+    """With tasks=True, per-task rows precede the summary block."""
+    jobs = [_summary_job("100_1", "COMPLETED"), _summary_job("100_2", "COMPLETED")]
+    renderer = _summary_renderer()
+    output = renderer.format_grouped_summary(jobs, _summary_options(tasks=True))
+    assert "100_1" in output
+    assert "100_2" in output
+    assert "Array 100" in output
 
 
 def test_format_grouped_summary_suppressed_in_parsable() -> None:
@@ -848,11 +903,7 @@ def test_format_grouped_summary_suppressed_in_parsable() -> None:
     renderer = _summary_renderer(parsable=True)
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(tasks=True),
     )
     assert "Array 100" not in output
     assert "100_1" in output
@@ -870,21 +921,25 @@ def test_format_grouped_summary_graph_min_tasks_threshold() -> None:
 
     below = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="histogram",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="histogram",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime (" not in below
 
     above = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime (min)" in above
 
@@ -899,22 +954,26 @@ def test_format_grouped_summary_graph_style_sparkline_vs_histogram() -> None:
 
     sparkline = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime dist:" in sparkline
     assert "Runtime (min)" not in sparkline
 
     histogram = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime (min)" in histogram
     assert "Runtime dist:" not in histogram
@@ -929,11 +988,13 @@ def test_format_grouped_summary_graph_style_none_suppresses_graph() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=0,
-        graph_style="none",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=0,
+            graph_style="none",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime dist:" not in output
     assert "Runtime (min)" not in output
@@ -948,11 +1009,13 @@ def test_format_grouped_summary_graph_format_selects_which_metric_graphs() -> No
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=0,
-        graph_style="sparkline",
-        graph_format="cpueff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=0,
+            graph_style="sparkline",
+            graph_format="cpueff",
+            ascii_fallback=False,
+        ),
     )
     # cpueff was requested and gets a graph...
     assert "CPUEff dist:" in output
@@ -973,11 +1036,13 @@ def test_format_grouped_summary_ascii_fallback() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="runtime",
-        ascii_fallback=True,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="runtime",
+            ascii_fallback=True,
+        ),
     )
     assert "•" not in output
     assert "·" not in output
@@ -1018,11 +1083,13 @@ def test_format_metrics_table_header_and_alignment() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     lines = output.splitlines()
     header_line = next(line for line in lines if "Metric" in line)
@@ -1051,11 +1118,13 @@ def test_format_metrics_table_no_bullet_separators() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     # the old prototype rendered lines like "CPUEff: min 90.0 · mean 90.0
     # · max 90.0" -- none of that per-metric inline format survives
@@ -1078,11 +1147,13 @@ def test_format_metrics_table_low_efficiency_uses_color_not_extra_text() -> None
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "low" not in output.lower()
     assert "\N{WARNING SIGN}" not in output
@@ -1091,7 +1162,7 @@ def test_format_metrics_table_low_efficiency_uses_color_not_extra_text() -> None
 def test_format_metrics_table_empty_when_no_numeric_metrics() -> None:
     """A group with no numeric metrics (e.g. all values non-coercible) is fine."""
     renderer = _summary_renderer()
-    assert renderer._format_metrics_table([], indent="  ") == []
+    assert renderer._format_metrics_table([]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1118,22 +1189,26 @@ def test_multi_metric_graphing_min_tasks_gates_every_metric() -> None:
 
     below = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="histogram",
-        graph_format="runtime,cpueff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="histogram",
+            graph_format="runtime,cpueff",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime (min)" not in below
     assert "CPUEff (%)" not in below
 
     above = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="runtime,cpueff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="runtime,cpueff",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime (min)" in above
     assert "CPUEff (%)" in above
@@ -1150,11 +1225,13 @@ def test_multi_metric_graphing_graph_style_none_suppresses_all() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=0,
-        graph_style="none",
-        graph_format="runtime,cpueff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=0,
+            graph_style="none",
+            graph_format="runtime,cpueff",
+            ascii_fallback=False,
+        ),
     )
     assert "dist:" not in output
     assert "(min)" not in output
@@ -1172,11 +1249,13 @@ def test_multi_metric_graphing_ascii_fallback() -> None:
     renderer = _summary_renderer()
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="runtime,cpueff",
-        ascii_fallback=True,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="runtime,cpueff",
+            ascii_fallback=True,
+        ),
     )
     assert "\u2588" not in output
     assert "#" in output
@@ -1210,11 +1289,13 @@ def test_multi_metric_graphing_sparkline_shows_each_requested_metric() -> None:
 
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="sparkline",
-        graph_format="runtime,cpueff,memeff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="sparkline",
+            graph_format="runtime,cpueff,memeff",
+            ascii_fallback=False,
+        ),
     )
     assert "Runtime dist:" in output
     assert "CPUEff dist:" in output
@@ -1243,11 +1324,13 @@ def test_energy_metric_graphs_with_joules_unit() -> None:
 
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=5,
-        graph_style="histogram",
-        graph_format="energy",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=5,
+            graph_style="histogram",
+            graph_format="energy",
+            ascii_fallback=False,
+        ),
     )
     assert "Energy" in output
     # no percent unit for Energy; it's shown as a bare, unitless histogram
@@ -1277,11 +1360,13 @@ def test_gpu_metrics_graph_gracefully_without_jobstat_data() -> None:
 
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=0,
-        graph_style="sparkline",
-        graph_format="gpueff,gpumem",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=0,
+            graph_style="sparkline",
+            graph_format="gpueff,gpumem",
+            ascii_fallback=False,
+        ),
     )
 
     assert "GPUEff dist:" not in output
@@ -1304,28 +1389,24 @@ def test_format_metric_graph_empty_values_returns_nothing() -> None:
     since it's otherwise unreachable through format_grouped_summary.
     """
     renderer = _summary_renderer()
-    assert (
-        renderer._format_metric_graph(
-            "CPUEff",
-            [],
-            unit="%",
-            graph_style="sparkline",
-            use_unicode=True,
-            indent="  ",
-        )
-        == []
+    empty_state = output_renderer._SummaryRenderState(
+        label="Array",
+        min_tasks=50,
+        graph_style="sparkline",
+        graphed=set(),
+        use_unicode=True,
     )
     assert (
-        renderer._format_metric_graph(
-            "CPUEff",
-            [],
-            unit="%",
-            graph_style="histogram",
-            use_unicode=True,
-            indent="  ",
-        )
-        == []
+        renderer._format_metric_graph("CPUEff", [], "%", empty_state) == []
     )
+    histogram_state = output_renderer._SummaryRenderState(
+        label="Array",
+        min_tasks=50,
+        graph_style="histogram",
+        graphed=set(),
+        use_unicode=True,
+    )
+    assert renderer._format_metric_graph("CPUEff", [], "%", histogram_state) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1344,11 +1425,13 @@ def test_format_summary_block_no_state_counters_for_empty_group() -> None:
         "999",
         [],
         ["CPUEff"],
-        label="Array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graphed=set(),
-        use_unicode=True,
+        output_renderer._SummaryRenderState(
+            label="Array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graphed=set(),
+            use_unicode=True,
+        ),
     )
     assert len(lines) == 1
     assert "Array 999" in lines[0]
@@ -1390,11 +1473,13 @@ def test_format_grouped_summary_all_unparseable_elapsed_omits_runtime_lines() ->
 
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime,cpueff",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime,cpueff",
+            ascii_fallback=False,
+        ),
     )
     assert "Total task-time" not in output
     assert "Mean runtime" not in output
@@ -1437,11 +1522,13 @@ def test_format_grouped_summary_renders_shared_and_nodelist() -> None:
 
     output = renderer.format_grouped_summary(
         jobs,
-        group_by="array",
-        min_tasks=50,
-        graph_style="sparkline",
-        graph_format="runtime",
-        ascii_fallback=False,
+        _summary_options(
+            group_by="array",
+            min_tasks=50,
+            graph_style="sparkline",
+            graph_format="runtime",
+            ascii_fallback=False,
+        ),
     )
     assert "Shared: Partition=CPU" in output
     assert "Nodes: somacpu[001-002]" in output

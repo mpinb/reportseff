@@ -242,6 +242,32 @@ def test_simple_job(mocker: MockerFixture, console_jobs: dict[str, str]) -> None
 
 
 @pytest.mark.usefixtures("_mock_inquirer")
+def test_format_runtime_is_an_alias_for_elapsed(
+    mocker: MockerFixture, console_jobs: dict[str, str]
+) -> None:
+    """--format Runtime produces output identical to --format Elapsed."""
+    mocker.patch("reportseff.console.which", return_value=True)
+    runner = CliRunner()
+    sub_result = mocker.MagicMock()
+    sub_result.returncode = 0
+    sub_result.stdout = console_jobs["24418435_notime"]
+    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=sub_result)
+
+    elapsed = runner.invoke(
+        console.main,
+        ["--no-color", "24418435", "--format", "JobID%>,State,Elapsed%>,CPUEff,MemEff"],
+    )
+    runtime = runner.invoke(
+        console.main,
+        ["--no-color", "24418435", "--format", "JobID%>,State,Runtime%>,CPUEff,MemEff"],
+    )
+
+    assert elapsed.exit_code == 0
+    assert runtime.exit_code == 0
+    assert runtime.output == elapsed.output
+
+
+@pytest.mark.usefixtures("_mock_inquirer")
 def test_simple_user(mocker: MockerFixture, console_jobs: dict[str, str]) -> None:
     """Can limit outputs by user."""
     mocker.patch("reportseff.console.which", return_value=True)
@@ -1793,6 +1819,57 @@ def test_summarize_min_tasks_gates_graph(
 
 
 @pytest.mark.usefixtures("_mock_inquirer")
+def test_summarize_tasks_default_suppresses_per_task_rows(
+    mocker: MockerFixture, console_jobs: dict[str, str]
+) -> None:
+    """Without --tasks, only the summary block is printed, not task rows."""
+    mocker.patch("reportseff.console.which", return_value=True)
+    runner = CliRunner()
+    sub_result = mocker.MagicMock()
+    sub_result.returncode = 0
+    sub_result.stdout = console_jobs["24221219"] + console_jobs["24221220"]
+    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=sub_result)
+
+    result = runner.invoke(
+        console.cli,
+        ["summarize", "--format", _SUMMARIZE_FORMAT, "--no-color", "24220929"],
+    )
+
+    assert result.exit_code == 0
+    assert "Array 24220929" in result.output
+    assert "24220929_421" not in result.output
+
+
+@pytest.mark.usefixtures("_mock_inquirer")
+def test_summarize_tasks_flag_includes_per_task_rows(
+    mocker: MockerFixture, console_jobs: dict[str, str]
+) -> None:
+    """--tasks prints each task's own row in addition to the summary block."""
+    mocker.patch("reportseff.console.which", return_value=True)
+    runner = CliRunner()
+    sub_result = mocker.MagicMock()
+    sub_result.returncode = 0
+    sub_result.stdout = console_jobs["24221219"] + console_jobs["24221220"]
+    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=sub_result)
+
+    result = runner.invoke(
+        console.cli,
+        [
+            "summarize",
+            "--format",
+            _SUMMARIZE_FORMAT,
+            "--no-color",
+            "--tasks",
+            "24220929",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Array 24220929" in result.output
+    assert "24220929_421" in result.output
+
+
+@pytest.mark.usefixtures("_mock_inquirer")
 def test_summarize_ascii_fallback(
     mocker: MockerFixture, console_jobs: dict[str, str]
 ) -> None:
@@ -1839,7 +1916,14 @@ def test_summarize_parsable_suppresses_summary_block(
 
     result = runner.invoke(
         console.cli,
-        ["summarize", "--format", _SUMMARIZE_FORMAT, "--parsable", "24220929"],
+        [
+            "summarize",
+            "--format",
+            _SUMMARIZE_FORMAT,
+            "--parsable",
+            "--tasks",
+            "24220929",
+        ],
     )
 
     assert result.exit_code == 0
@@ -1877,7 +1961,7 @@ def test_summarize_singleton_job_gets_no_summary_block(
 
     result = runner.invoke(
         console.cli,
-        ["summarize", "--no-color", "24418435"],
+        ["summarize", "--no-color", "--tasks", "24418435"],
     )
 
     assert result.exit_code == 0
