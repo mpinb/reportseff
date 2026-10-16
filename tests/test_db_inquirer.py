@@ -1055,20 +1055,82 @@ def test_augment_skips_short_sentinel(mocker: MockerFixture) -> None:
     assert result[0]["AdminComment"] == ""
 
 
-@pytest.mark.usefixtures("_mock_jobstats_path")
-def test_augment_partial_failure(mocker: MockerFixture) -> None:
-    """On partial failure only the rows matching stdout lines are updated."""
-    fake_b64 = "dGVzdHBheWxvYWQ="
-    mock_result = mocker.MagicMock()
-    # jobstats processed only the first ID before failing
-    mock_result.stdout = fake_b64 + "\n"
-    mock_result.returncode = 1
-    mocker.patch("reportseff.db_inquirer.subprocess.run", return_value=mock_result)
+def _jobstats_result(
+    mocker: MockerFixture, stdout: str, returncode: int
+) -> MagicMock:
+    result = mocker.MagicMock()
+    result.stdout = stdout
+    result.returncode = returncode
+    return result
 
-    rows = [_make_row("1", "1"), _make_row("2", "2")]
+
+@pytest.mark.usefixtures("_mock_jobstats_path")
+def test_augment_retries_after_failed_job(mocker: MockerFixture) -> None:
+    """A job jobstats cannot look up is skipped and the remainder retried."""
+    mock_sub = mocker.patch(
+        "reportseff.db_inquirer.subprocess.run",
+        side_effect=[
+            _jobstats_result(mocker, "YQ==\n", 1),  # job 1 ok, job 2 aborts
+            _jobstats_result(mocker, "Yw==\nZA==\n", 0),  # jobs 3 and 4
+        ],
+    )
+
+    rows = [_make_row(str(i), str(i)) for i in range(1, 5)]
+    debug_messages: list[str] = []
+    result = augment_with_jobstats(rows, debug_cmd=debug_messages.append)
+
+    assert [r["AdminComment"] for r in result] == ["JS1:YQ==", "", "JS1:Yw==", "JS1:ZA=="]
+    assert mock_sub.call_args_list[1][0][0] == ["/usr/bin/jobstats", "3", "4", "-b"]
+    assert any("lookup failed for job 2" in m for m in debug_messages)
+
+
+@pytest.mark.usefixtures("_mock_jobstats_path")
+def test_augment_failure_on_first_and_last_job(mocker: MockerFixture) -> None:
+    """Failures at either end of the batch do not lose or misalign results."""
+    mock_sub = mocker.patch(
+        "reportseff.db_inquirer.subprocess.run",
+        side_effect=[
+            _jobstats_result(mocker, "", 1),  # job 1 aborts immediately
+            _jobstats_result(mocker, "Yg==\n", 1),  # job 2 ok, job 3 aborts
+        ],
+    )
+
+    rows = [_make_row(str(i), str(i)) for i in range(1, 4)]
     result = augment_with_jobstats(rows)
-    assert result[0]["AdminComment"] == f"JS1:{fake_b64}"
-    assert result[1]["AdminComment"] == ""  # not reached
+
+    assert [r["AdminComment"] for r in result] == ["", "JS1:Yg==", ""]
+    assert mock_sub.call_count == 2
+
+
+@pytest.mark.usefixtures("_mock_jobstats_path")
+def test_augment_retry_subprocess_exception(mocker: MockerFixture) -> None:
+    """An exception during a retry keeps what was already recovered."""
+    mocker.patch(
+        "reportseff.db_inquirer.subprocess.run",
+        side_effect=[_jobstats_result(mocker, "YQ==\n", 1), OSError("gone")],
+    )
+
+    rows = [_make_row(str(i), str(i)) for i in range(1, 4)]
+    result = augment_with_jobstats(rows)
+
+    assert [r["AdminComment"] for r in result] == ["JS1:YQ==", "", ""]
+
+
+@pytest.mark.usefixtures("_mock_jobstats_path")
+def test_augment_skips_pending_jobs(mocker: MockerFixture) -> None:
+    """PENDING jobs are never sent to jobstats."""
+    mock_sub = mocker.patch(
+        "reportseff.db_inquirer.subprocess.run",
+        return_value=_jobstats_result(mocker, "YQ==\n", 0),
+    )
+
+    pending = {**_make_row("1", "1"), "State": "PENDING"}
+    running = {**_make_row("2", "2"), "State": "RUNNING"}
+    result = augment_with_jobstats([pending, running])
+
+    assert result[0]["AdminComment"] == ""
+    assert result[1]["AdminComment"] == "JS1:YQ=="
+    assert mock_sub.call_args[0][0] == ["/usr/bin/jobstats", "2", "-b"]
 
 
 @pytest.mark.usefixtures("_mock_jobstats_path")

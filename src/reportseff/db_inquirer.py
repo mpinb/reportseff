@@ -81,8 +81,10 @@ def augment_with_jobstats(
 
     The subprocess call is batched (one fork for all missing rows) to avoid
     spawning one process per array-job task.  jobstats processes IDs in order
-    and prints each result before moving to the next, so on a partial failure
-    the output lines map positionally to the *first K* input IDs.
+    and prints each result before moving to the next, but exits at the first ID
+    it cannot look up.  On such a failure the output lines map positionally to
+    the *first K* input IDs, the failing ID is skipped, and the rest are retried
+    in a new call.
 
     Args:
         rows: sacct rows as returned by :meth:`SacctInquirer.get_db_output`.
@@ -92,9 +94,9 @@ def augment_with_jobstats(
         The same list with ``AdminComment`` updated in-place for matched rows.
     """
     # Collect rows that need augmentation.  Skip .batch/.extern sub-steps
-    # (JobIDRaw is empty or equals the parent) and rows already having data.
-    missing_idx: list[int] = []
-    missing_rawids: list[str] = []
+    # (JobIDRaw is empty or equals the parent), PENDING jobs (jobstats has
+    # nothing to report and aborts on them) and rows already having data.
+    missing: list[tuple[int, str]] = []
 
     for i, row in enumerate(rows):
         admin = row.get("AdminComment", "")
@@ -103,46 +105,55 @@ def augment_with_jobstats(
             len(admin) <= _ADMIN_COMMENT_MIN_LENGTH
             and rawid
             and "." not in row.get("JobID", "")
+            and not row.get("State", "").startswith("PENDING")
         ):
-            missing_idx.append(i)
-            missing_rawids.append(rawid)
+            missing.append((i, rawid))
 
-    if not missing_rawids:
+    if not missing:
         return rows
 
     if debug_cmd is not None:
         debug_cmd(
             f"jobstats fallback: fetching GPU metrics for "
-            f"{len(missing_rawids)} job(s) via `jobstats -b`"
+            f"{len(missing)} job(s) via `jobstats -b`"
         )
 
     jobstats_path = shutil.which("jobstats")
     if jobstats_path is None:
         return rows
 
-    try:
-        proc = subprocess.run(  # noqa: S603
-            [jobstats_path, *missing_rawids, "-b"],
-            capture_output=True,
-            encoding="utf8",
-            check=False,
-        )
-    except Exception:  # noqa: BLE001
-        # jobstats unavailable or crashed entirely — leave rows unchanged.
-        return rows
+    while missing:
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [jobstats_path, *(rawid for _, rawid in missing), "-b"],
+                capture_output=True,
+                encoding="utf8",
+                check=False,
+            )
+        except Exception:  # noqa: BLE001
+            # jobstats unavailable or crashed entirely — leave rows unchanged.
+            return rows
 
-    output_lines = [line for line in proc.stdout.splitlines() if line]
+        output_lines = [line for line in proc.stdout.splitlines() if line]
 
-    # Map lines back to input IDs positionally.  jobstats exits on the first
-    # failure so stdout may contain fewer lines than requested.
-    for list_pos, row_idx in enumerate(missing_idx):
-        if list_pos >= len(output_lines):
+        # Map lines back to input IDs positionally.
+        processed = min(len(output_lines), len(missing))
+        for (row_idx, _), payload in zip(missing, output_lines[:processed]):
+            # Skip jobstats sentinel values.
+            if payload not in ("None", "Short"):
+                rows[row_idx]["AdminComment"] = "JS1:" + payload
+
+        if proc.returncode == 0 or processed >= len(missing):
             break
-        payload = output_lines[list_pos]
-        # Skip jobstats sentinel values.
-        if payload in ("None", "Short"):
-            continue
-        rows[row_idx]["AdminComment"] = "JS1:" + payload
+
+        # jobstats exits on the first job it cannot look up, so the job at
+        # position `processed` failed: skip it and retry with the remainder.
+        if debug_cmd is not None:
+            debug_cmd(
+                f"jobstats fallback: lookup failed for job "
+                f"{missing[processed][1]}, retrying remaining jobs"
+            )
+        missing = missing[processed + 1 :]
 
     return rows
 
