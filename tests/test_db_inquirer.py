@@ -3,6 +3,7 @@
 import datetime
 import subprocess
 from collections.abc import Generator
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_mock import MockerFixture
@@ -1055,10 +1056,8 @@ def test_augment_skips_short_sentinel(mocker: MockerFixture) -> None:
     assert result[0]["AdminComment"] == ""
 
 
-def _jobstats_result(
-    mocker: MockerFixture, stdout: str, returncode: int
-) -> MagicMock:
-    result = mocker.MagicMock()
+def _jobstats_result(mocker: MockerFixture, stdout: str, returncode: int) -> MagicMock:
+    result: MagicMock = mocker.MagicMock()
     result.stdout = stdout
     result.returncode = returncode
     return result
@@ -1079,7 +1078,12 @@ def test_augment_retries_after_failed_job(mocker: MockerFixture) -> None:
     debug_messages: list[str] = []
     result = augment_with_jobstats(rows, debug_cmd=debug_messages.append)
 
-    assert [r["AdminComment"] for r in result] == ["JS1:YQ==", "", "JS1:Yw==", "JS1:ZA=="]
+    assert [r["AdminComment"] for r in result] == [
+        "JS1:YQ==",
+        "",
+        "JS1:Yw==",
+        "JS1:ZA==",
+    ]
     assert mock_sub.call_args_list[1][0][0] == ["/usr/bin/jobstats", "3", "4", "-b"]
     assert any("lookup failed for job 2" in m for m in debug_messages)
 

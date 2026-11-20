@@ -66,6 +66,59 @@ def _check_jobstats_available() -> bool:
     return _JOBSTATS_AVAILABLE
 
 
+def _rows_missing_admin_comment(
+    rows: list[dict[str, str]],
+) -> list[tuple[int, str]]:
+    """Select the rows to look up with jobstats.
+
+    Skips .batch/.extern sub-steps (JobIDRaw is empty or equals the parent),
+    PENDING jobs (jobstats has nothing to report and aborts on them) and rows
+    already having data.
+
+    Args:
+        rows: sacct rows as returned by :meth:`SacctInquirer.get_db_output`.
+
+    Returns:
+        ``(row index, JobIDRaw)`` pairs, in row order.
+    """
+    return [
+        (i, row["JobIDRaw"])
+        for i, row in enumerate(rows)
+        if len(row.get("AdminComment", "")) <= _ADMIN_COMMENT_MIN_LENGTH
+        and row.get("JobIDRaw", "")
+        and "." not in row.get("JobID", "")
+        and not row.get("State", "").startswith("PENDING")
+    ]
+
+
+def _apply_jobstats_output(
+    rows: list[dict[str, str]],
+    missing: list[tuple[int, str]],
+    stdout: str,
+) -> int:
+    """Store the payloads printed by one `jobstats -b` call into ``rows``.
+
+    Output lines map positionally to the *first K* ids of ``missing``.
+    The jobstats sentinel values ``None`` and ``Short`` are not stored.
+
+    Args:
+        rows: sacct rows, updated in-place.
+        missing: the ``(row index, JobIDRaw)`` pairs passed to jobstats.
+        stdout: the standard output of the jobstats call.
+
+    Returns:
+        The number of jobs jobstats answered.
+    """
+    output_lines = [line for line in stdout.splitlines() if line]
+    processed = min(len(output_lines), len(missing))
+    for (row_idx, _), payload in zip(
+        missing[:processed], output_lines[:processed], strict=True
+    ):
+        if payload not in ("None", "Short"):
+            rows[row_idx]["AdminComment"] = "JS1:" + payload
+    return processed
+
+
 def augment_with_jobstats(
     rows: list[dict[str, str]],
     *,
@@ -93,21 +146,7 @@ def augment_with_jobstats(
     Returns:
         The same list with ``AdminComment`` updated in-place for matched rows.
     """
-    # Collect rows that need augmentation.  Skip .batch/.extern sub-steps
-    # (JobIDRaw is empty or equals the parent), PENDING jobs (jobstats has
-    # nothing to report and aborts on them) and rows already having data.
-    missing: list[tuple[int, str]] = []
-
-    for i, row in enumerate(rows):
-        admin = row.get("AdminComment", "")
-        rawid = row.get("JobIDRaw", "")
-        if (
-            len(admin) <= _ADMIN_COMMENT_MIN_LENGTH
-            and rawid
-            and "." not in row.get("JobID", "")
-            and not row.get("State", "").startswith("PENDING")
-        ):
-            missing.append((i, rawid))
+    missing = _rows_missing_admin_comment(rows)
 
     if not missing:
         return rows
@@ -134,14 +173,7 @@ def augment_with_jobstats(
             # jobstats unavailable or crashed entirely — leave rows unchanged.
             return rows
 
-        output_lines = [line for line in proc.stdout.splitlines() if line]
-
-        # Map lines back to input IDs positionally.
-        processed = min(len(output_lines), len(missing))
-        for (row_idx, _), payload in zip(missing, output_lines[:processed]):
-            # Skip jobstats sentinel values.
-            if payload not in ("None", "Short"):
-                rows[row_idx]["AdminComment"] = "JS1:" + payload
+        processed = _apply_jobstats_output(rows, missing, proc.stdout)
 
         if proc.returncode == 0 or processed >= len(missing):
             break
